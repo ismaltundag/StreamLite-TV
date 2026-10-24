@@ -12,6 +12,8 @@ import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import java.net.URL
+import java.net.URLEncoder
+import org.json.JSONArray
 import kotlin.concurrent.thread
 
 /** TV-first prototype: load an authorized M3U URL and select a channel. */
@@ -35,13 +37,27 @@ class MainActivity : Activity() {
             setTextColor(-1)
         }
         val url = EditText(this).apply {
-            hint = "Paste your authorized M3U playlist URL"
+            hint = "Server URL (Xtream) or M3U playlist URL"
             setSingleLine(true)
             setTextColor(-1)
             setHintTextColor(0xffaab4c2.toInt())
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
         }
-        val load = Button(this).apply { text = "Load playlist" }
+        val username = EditText(this).apply {
+            hint = "Xtream username"
+            setSingleLine(true)
+            setTextColor(-1)
+            setHintTextColor(0xffaab4c2.toInt())
+        }
+        val password = EditText(this).apply {
+            hint = "Xtream password"
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setTextColor(-1)
+            setHintTextColor(0xffaab4c2.toInt())
+        }
+        val login = Button(this).apply { text = "Login with Xtream Codes" }
+        val load = Button(this).apply { text = "Load M3U playlist" }
         status = TextView(this).apply {
             text = "Ready. Add a playlist to begin."
             setTextColor(-1)
@@ -54,11 +70,52 @@ class MainActivity : Activity() {
         val scroll = ScrollView(this).apply { addView(list) }
         root.addView(title)
         root.addView(url)
+        root.addView(username)
+        root.addView(password)
+        root.addView(login)
         root.addView(load)
         root.addView(status)
         root.addView(video, LinearLayout.LayoutParams(-1, 0, 2f))
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
+        login.setOnClickListener {
+            val server = url.text.toString().trim().trimEnd('/')
+            val user = username.text.toString().trim()
+            val pass = password.text.toString()
+            if (!(server.startsWith("https://") || server.startsWith("http://")) || user.isBlank() || pass.isBlank()) {
+                status.text = "Enter server URL, Xtream username and password"
+                return@setOnClickListener
+            }
+            status.text = "Connecting to Xtream…"
+            thread {
+                try {
+                    val encodedUser = URLEncoder.encode(user, "UTF-8")
+                    val encodedPass = URLEncoder.encode(pass, "UTF-8")
+                    val api = "$"+"server/player_api.php?username=$"+"encodedUser&password=$"+"encodedPass"
+                    val info = URL(api).openConnection().apply {
+                        connectTimeout = 10000
+                        readTimeout = 15000
+                    }.getInputStream().bufferedReader().use { it.readText() }
+                    val auth = org.json.JSONObject(info).optJSONObject("user_info")
+                    if (auth?.optInt("auth", 0) != 1) throw IllegalArgumentException("Invalid login or unsupported Xtream server")
+                    val response = URL("$"+"api&action=get_live_streams").openConnection().apply {
+                        connectTimeout = 10000
+                        readTimeout = 20000
+                    }.getInputStream().bufferedReader().use { it.readText() }
+                    val streams = JSONArray(response)
+                    val channels = (0 until streams.length()).mapNotNull { index ->
+                        val item = streams.optJSONObject(index) ?: return@mapNotNull null
+                        val id = item.optLong("stream_id", -1)
+                        if (id < 0) return@mapNotNull null
+                        val name = item.optString("name", "Channel")
+                        name to "$"+"server/live/$"+"encodedUser/$"+"encodedPass/$"+"id.ts"
+                    }
+                    runOnUiThread { showChannels(channels) }
+                } catch (e: Exception) {
+                    runOnUiThread { status.text = "Xtream login failed: $"+"{e.message}" }
+                }
+            }
+        }
         load.setOnClickListener {
             val address = url.text.toString().trim()
             if (!address.startsWith("https://") && !address.startsWith("http://")) {
@@ -74,26 +131,28 @@ class MainActivity : Activity() {
                     }
                     val body = connection.getInputStream().bufferedReader().use { it.readText() }
                     val channels = parseM3u(body)
-                    runOnUiThread {
-                        list.removeAllViews()
-                        status.text = "${channels.size} channels found"
-                        channels.take(2000).forEach { (name, stream) ->
-                            list.addView(Button(this).apply {
-                                text = name
-                                gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                                isFocusable = true
-                                setOnClickListener {
-                                    player.setMediaItem(MediaItem.fromUri(stream))
-                                    player.prepare()
-                                    player.play()
-                                }
-                            })
-                        }
-                    }
+                    runOnUiThread { showChannels(channels) }
                 } catch (e: Exception) {
                     runOnUiThread { status.text = "Playlist failed: ${e.message}" }
                 }
             }
+        }
+    }
+
+    private fun showChannels(channels: List<Pair<String, String>>) {
+        list.removeAllViews()
+        status.text = "$"+"{channels.size} channels found"
+        channels.take(2000).forEach { (name, stream) ->
+            list.addView(Button(this).apply {
+                text = name
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                isFocusable = true
+                setOnClickListener {
+                    player.setMediaItem(MediaItem.fromUri(stream))
+                    player.prepare()
+                    player.play()
+                }
+            })
         }
     }
 
