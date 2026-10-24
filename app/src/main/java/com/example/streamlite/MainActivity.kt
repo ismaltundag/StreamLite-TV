@@ -1,177 +1,408 @@
 package com.example.streamlite
 
 import android.app.Activity
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.os.Bundle
+import android.text.InputType
 import android.view.Gravity
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
+import android.view.View
+import android.widget.*
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
-import java.net.URL
-import java.net.URLEncoder
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.MultiFormatWriter
+import com.google.zxing.common.BitMatrix
 import org.json.JSONArray
+import org.json.JSONObject
+import java.net.*
+import java.io.*
+import java.security.SecureRandom
 import kotlin.concurrent.thread
 
-/** TV-first prototype: load an authorized M3U URL and select a channel. */
 class MainActivity : Activity() {
+    private val bg = Color.rgb(12, 17, 29)
+    private val panel = Color.rgb(27, 36, 53)
+    private val accent = Color.rgb(39, 189, 229)
+    private val prefs by lazy { getSharedPreferences("iptv", MODE_PRIVATE) }
+    private lateinit var root: LinearLayout
+    private lateinit var status: TextView
     private lateinit var player: ExoPlayer
     private lateinit var video: PlayerView
-    private lateinit var list: LinearLayout
-    private lateinit var status: TextView
+    private lateinit var items: LinearLayout
+    private var server = ""
+    private var username = ""
+    private var password = ""
+    private var section = "live"
+    private var filter = "all"
+    private var channels = mutableListOf<Entry>()
+    private var movies = mutableListOf<Entry>()
+    private var series = mutableListOf<Entry>()
+    private val favorites = mutableSetOf<String>()
+    private val recent = mutableListOf<String>()
+    private var pairServer: ServerSocket? = null
+    private var pairToken = ""
+    private var pairing = false
+
+    data class Entry(val id: String, val name: String, val url: String, val kind: String, val container: String = "mp4")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         player = ExoPlayer.Builder(this).build()
-        val root = LinearLayout(this).apply {
+        favorites.addAll(prefs.getStringSet("favorites", emptySet()) ?: emptySet())
+        recent.addAll(prefs.getString("recent", "")!!.split("|").filter { it.isNotBlank() })
+        server = prefs.getString("server", "") ?: ""
+        username = prefs.getString("username", "") ?: ""
+        password = prefs.getString("password", "") ?: ""
+        if (server.isNotBlank() && username.isNotBlank() && password.isNotBlank()) loadAccount() else showLogin()
+    }
+
+    private fun label(value: String, size: Float = 18f): TextView = TextView(this).apply {
+        text = value
+        textSize = size
+        setTextColor(Color.WHITE)
+        setPadding(12, 10, 12, 10)
+    }
+
+    private fun button(value: String, action: () -> Unit): Button = Button(this).apply {
+        text = value
+        isFocusable = true
+        setTextColor(Color.WHITE)
+        setBackgroundTintList(android.content.res.ColorStateList.valueOf(panel))
+        setOnClickListener { action() }
+    }
+
+    private fun base(): LinearLayout {
+        root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(24, 16, 24, 16)
-            setBackgroundColor(0xff101827.toInt())
+            setPadding(28, 18, 28, 18)
+            setBackgroundColor(bg)
         }
-        val title = TextView(this).apply {
-            text = "Ismail IPTV · Live"
-            textSize = 26f
-            setTextColor(-1)
-        }
-        val url = EditText(this).apply {
-            hint = "Server URL (Xtream) or M3U playlist URL"
-            setSingleLine(true)
-            setTextColor(-1)
-            setHintTextColor(0xffaab4c2.toInt())
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
-        }
-        val username = EditText(this).apply {
-            hint = "Xtream username"
-            setSingleLine(true)
-            setTextColor(-1)
-            setHintTextColor(0xffaab4c2.toInt())
-        }
-        val password = EditText(this).apply {
-            hint = "Xtream password"
-            setSingleLine(true)
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setTextColor(-1)
-            setHintTextColor(0xffaab4c2.toInt())
-        }
-        val login = Button(this).apply { text = "Login with Xtream Codes" }
-        val load = Button(this).apply { text = "Load M3U playlist" }
-        status = TextView(this).apply {
-            text = "Ready. Add a playlist to begin."
-            setTextColor(-1)
-        }
-        video = PlayerView(this).apply {
-            player = this@MainActivity.player
-            useController = true
-        }
-        list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val scroll = ScrollView(this).apply { addView(list) }
-        root.addView(title)
-        root.addView(url)
-        root.addView(username)
-        root.addView(password)
-        root.addView(login)
-        root.addView(load)
-        root.addView(status)
-        root.addView(video, LinearLayout.LayoutParams(-1, 0, 2f))
-        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
-        login.setOnClickListener {
-            val server = url.text.toString().trim().trimEnd('/')
-            val user = username.text.toString().trim()
-            val pass = password.text.toString()
-            if (!(server.startsWith("https://") || server.startsWith("http://")) || user.isBlank() || pass.isBlank()) {
-                status.text = "Enter server URL, Xtream username and password"
-                return@setOnClickListener
+        return root
+    }
+
+    private fun field(hintText: String, value: String = "", secret: Boolean = false): EditText = EditText(this).apply {
+        hint = hintText
+        setText(value)
+        setSingleLine(true)
+        textSize = 18f
+        setTextColor(Color.WHITE)
+        setHintTextColor(Color.LTGRAY)
+        inputType = if (secret) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+    }
+
+    private fun showLogin(message: String = "Sign in once. Your account stays saved on this TV.") {
+        base()
+        val outer = LinearLayout(this).apply { gravity = Gravity.CENTER; orientation = LinearLayout.VERTICAL }
+        root.addView(outer, LinearLayout.LayoutParams(-1, -1))
+        outer.addView(label("ISMAIL IPTV", 32f))
+        outer.addView(label("XTREAM CODES LOGIN", 21f))
+        val serverField = field("Server URL including port", server)
+        val userField = field("Username", username)
+        val passField = field("Password", password, true)
+        val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 20, 28, 20); setBackgroundColor(panel) }
+        outer.addView(form, LinearLayout.LayoutParams((resources.displayMetrics.widthPixels * .68).toInt(), -2))
+        form.addView(serverField)
+        form.addView(userField)
+        form.addView(passField)
+        status = label(message, 15f)
+        form.addView(status)
+        form.addView(button("SIGN IN") {
+            val s = serverField.text.toString().trim().trimEnd('/')
+            val u = userField.text.toString().trim()
+            val p = passField.text.toString()
+            if (!(s.startsWith("http://") || s.startsWith("https://")) || u.isEmpty() || p.isEmpty()) {
+                status.text = "Enter a complete server URL, username and password"
+            } else {
+                server = s; username = u; password = p
+                stopPairing()
+                loadAccount()
             }
-            status.text = "Connecting to Xtream…"
-            thread {
-                try {
-                    val encodedUser = URLEncoder.encode(user, "UTF-8")
-                    val encodedPass = URLEncoder.encode(pass, "UTF-8")
-                    val api = "${server}/player_api.php?username=${encodedUser}&password=${encodedPass}"
-                    val info = URL(api).openConnection().apply {
-                        connectTimeout = 10000
-                        readTimeout = 15000
-                    }.getInputStream().bufferedReader().use { it.readText() }
-                    val auth = org.json.JSONObject(info).optJSONObject("user_info")
-                    if (auth?.optInt("auth", 0) != 1) throw IllegalArgumentException("Invalid login or unsupported Xtream server")
-                    val response = URL("${api}&action=get_live_streams").openConnection().apply {
-                        connectTimeout = 10000
-                        readTimeout = 20000
-                    }.getInputStream().bufferedReader().use { it.readText() }
-                    val streams = JSONArray(response)
-                    val channels = (0 until streams.length()).mapNotNull { index ->
-                        val item = streams.optJSONObject(index) ?: return@mapNotNull null
-                        val id = item.optLong("stream_id", -1)
-                        if (id < 0) return@mapNotNull null
-                        val name = item.optString("name", "Channel")
-                        name to "${server}/live/${encodedUser}/${encodedPass}/${id}.ts"
-                    }
-                    runOnUiThread { showChannels(channels) }
-                } catch (e: Exception) {
-                    runOnUiThread { status.text = "Xtream login failed: ${e.message ?: e.javaClass.simpleName}" }
-                }
-            }
-        }
-        load.setOnClickListener {
-            val address = url.text.toString().trim()
-            if (!address.startsWith("https://") && !address.startsWith("http://")) {
-                status.text = "Enter a valid HTTP(S) playlist URL"
-                return@setOnClickListener
-            }
-            status.text = "Loading…"
-            thread {
-                try {
-                    val connection = URL(address).openConnection().apply {
-                        connectTimeout = 10000
-                        readTimeout = 15000
-                    }
-                    val body = connection.getInputStream().bufferedReader().use { it.readText() }
-                    val channels = parseM3u(body)
-                    runOnUiThread { showChannels(channels) }
-                } catch (e: Exception) {
-                    runOnUiThread { status.text = "Playlist failed: ${e.message}" }
+        })
+        form.addView(button("ENTER LOGIN ON PHONE  ·  QR CODE") { startPairing(form) })
+    }
+
+    private fun loadAccount() {
+        base()
+        status = label("Connecting to Xtream…", 20f)
+        root.addView(status)
+        thread {
+            try {
+                val auth = JSONObject(fetch(api(""))).optJSONObject("user_info")
+                if (auth?.optInt("auth", 0) != 1) throw IllegalArgumentException("Server rejected login. Check credentials and URL.")
+                val live = parseEntries(fetch(api("get_live_streams")), "live")
+                val vod = parseEntries(fetch(api("get_vod_streams")), "movie")
+                val shows = parseEntries(fetch(api("get_series")), "series")
+                channels = live.toMutableList()
+                movies = vod.toMutableList()
+                series = shows.toMutableList()
+                prefs.edit().putString("server", server).putString("username", username).putString("password", password).apply()
+                runOnUiThread { showHome() }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    status.text = "Unable to load: " + (e.message ?: e.javaClass.simpleName)
+                    root.addView(button("RETRY") { loadAccount() })
+                    root.addView(button("EDIT LOGIN") { showLogin() })
                 }
             }
         }
     }
 
-    private fun showChannels(channels: List<Pair<String, String>>) {
-        list.removeAllViews()
-        status.text = "${channels.size} channels found"
-        channels.take(2000).forEach { (name, stream) ->
-            list.addView(Button(this).apply {
-                text = name
-                gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                isFocusable = true
-                setOnClickListener {
-                    player.setMediaItem(MediaItem.fromUri(stream))
-                    player.prepare()
-                    player.play()
-                }
+    private fun api(action: String): String {
+        val user = URLEncoder.encode(username, "UTF-8")
+        val pass = URLEncoder.encode(password, "UTF-8")
+        return server + "/player_api.php?username=" + user + "&password=" + pass +
+            (if (action.isBlank()) "" else "&action=" + action)
+    }
+
+    private fun fetch(address: String): String {
+        val connection = URL(address).openConnection().apply { connectTimeout = 10000; readTimeout = 20000 }
+        return connection.getInputStream().bufferedReader().use { it.readText() }
+    }
+
+    private fun parseEntries(json: String, kind: String): List<Entry> {
+        val data = JSONArray(json)
+        val u = URLEncoder.encode(username, "UTF-8")
+        val p = URLEncoder.encode(password, "UTF-8")
+        return (0 until data.length()).mapNotNull { index ->
+            val item = data.optJSONObject(index) ?: return@mapNotNull null
+            val id = item.optString(if (kind == "series") "series_id" else "stream_id")
+            if (id.isBlank()) return@mapNotNull null
+            val name = item.optString("name", "Untitled")
+            val extension = item.optString("container_extension", "mp4").ifBlank { "mp4" }
+            val address = when (kind) {
+                "live" -> server + "/live/" + u + "/" + p + "/" + id + ".ts"
+                "movie" -> server + "/movie/" + u + "/" + p + "/" + id + "." + extension
+                else -> ""
+            }
+            Entry(kind + ":" + id, name, address, kind, extension)
+        }
+    }
+
+    private fun showHome() {
+        base()
+        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        root.addView(header)
+        header.addView(label("ISMAIL IPTV", 24f))
+        for (tab in listOf("live", "movie", "series")) {
+            header.addView(button(when (tab) { "live" -> "LIVE TV"; "movie" -> "MOVIES"; else -> "SERIES" } +
+                if (section == tab) "  ●" else "") { section = tab; filter = "all"; showHome() })
+        }
+        header.addView(button("ACCOUNT") { showAccount() })
+        val body = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        root.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
+        val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        body.addView(left, LinearLayout.LayoutParams(0, -1, 1f))
+        val filters = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        left.addView(filters)
+        if (section == "live") {
+            for ((key, title) in listOf("all" to "ALL", "favorites" to "★ FAVORITES", "recent" to "◷ RECENT")) {
+                filters.addView(button(title + if (filter == key) " ●" else "") { filter = key; showHome() })
+            }
+        }
+        status = label("", 15f)
+        left.addView(status)
+        val scroll = ScrollView(this)
+        items = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        scroll.addView(items)
+        left.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        body.addView(right, LinearLayout.LayoutParams(0, -1, 1f))
+        video = PlayerView(this).apply { player = this@MainActivity.player; useController = true }
+        right.addView(video, LinearLayout.LayoutParams(-1, 0, 1f))
+        right.addView(label("Select a channel or movie to start watching.", 16f))
+        populate()
+    }
+
+    private fun populate() {
+        items.removeAllViews()
+        val source = when (section) { "live" -> channels; "movie" -> movies; else -> series }
+        val selected = when (filter) {
+            "favorites" -> source.filter { favorites.contains(it.id) }
+            "recent" -> recent.mapNotNull { id -> source.find { it.id == id } }
+            else -> source
+        }
+        status.text = selected.size.toString() + " " + when (section) { "live" -> "channels"; "movie" -> "movies"; else -> "series" }
+        selected.take(1500).forEach { entry ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val play = button(entry.name) {
+                if (entry.kind == "series") showEpisodes(entry) else play(entry)
+            }
+            row.addView(play, LinearLayout.LayoutParams(0, -2, 1f))
+            if (section == "live") row.addView(button(if (favorites.contains(entry.id)) "★" else "☆") {
+                if (!favorites.add(entry.id)) favorites.remove(entry.id)
+                prefs.edit().putStringSet("favorites", favorites.toSet()).apply()
+                populate()
             })
+            items.addView(row)
         }
     }
 
-    private fun parseM3u(text: String): List<Pair<String, String>> {
-        val result = mutableListOf<Pair<String, String>>()
-        var pending: String? = null
-        for (raw in text.lineSequence()) {
-            val line = raw.trim()
-            if (line.startsWith("#EXTINF", ignoreCase = true)) {
-                pending = line.substringAfterLast(',').ifBlank { "Unnamed channel" }
-            } else if (!line.startsWith("#") &&
-                (line.startsWith("http://") || line.startsWith("https://"))) {
-                result += (pending ?: "Channel ${result.size + 1}") to line
-                pending = null
+    private fun play(entry: Entry) {
+        if (entry.url.isBlank()) return
+        player.setMediaItem(MediaItem.fromUri(entry.url))
+        player.prepare()
+        player.play()
+        recent.remove(entry.id)
+        recent.add(0, entry.id)
+        while (recent.size > 40) recent.removeAt(recent.lastIndex)
+        prefs.edit().putString("recent", recent.joinToString("|")).apply()
+        status.text = "Now playing: " + entry.name
+    }
+
+    private fun showEpisodes(show: Entry) {
+        status.text = "Loading episodes for " + show.name + "…"
+        thread {
+            try {
+                val id = show.id.substringAfter(':')
+                val json = JSONObject(fetch(api("get_series_info") + "&series_id=" + URLEncoder.encode(id, "UTF-8")))
+                val episodes = json.optJSONObject("episodes") ?: JSONObject()
+                val entries = mutableListOf<Entry>()
+                val seasons = episodes.keys()
+                while (seasons.hasNext()) {
+                    val season = seasons.next()
+                    val arr = episodes.optJSONArray(season) ?: continue
+                    for (i in 0 until arr.length()) {
+                        val ep = arr.optJSONObject(i) ?: continue
+                        val epId = ep.optString("id")
+                        if (epId.isBlank()) continue
+                        val ext = ep.optString("container_extension", "mp4").ifBlank { "mp4" }
+                        val u = URLEncoder.encode(username, "UTF-8")
+                        val p = URLEncoder.encode(password, "UTF-8")
+                        entries.add(Entry("episode:" + epId, "S" + season + " · " + ep.optString("title", "Episode " + (i + 1)),
+                            server + "/series/" + u + "/" + p + "/" + epId + "." + ext, "episode"))
+                    }
+                }
+                runOnUiThread {
+                    items.removeAllViews()
+                    items.addView(button("← BACK TO SERIES") { showHome() })
+                    status.text = show.name + " · " + entries.size + " episodes"
+                    entries.forEach { ep -> items.addView(button(ep.name) { play(ep) }) }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { status.text = "Episodes failed: " + (e.message ?: "Unknown error") }
             }
         }
-        return result
     }
 
-    override fun onStop() { super.onStop(); player.pause() }
-    override fun onDestroy() { player.release(); super.onDestroy() }
+    private fun showAccount() {
+        base()
+        root.addView(label("ACCOUNT", 28f))
+        root.addView(label("Signed in as " + username + " · " + server))
+        root.addView(button("BACK TO TV") { showHome() })
+        root.addView(button("CHANGE LOGIN") {
+            prefs.edit().remove("password").apply()
+            password = ""
+            showLogin()
+        })
+    }
+
+    private fun stopPairing() {
+        pairing = false
+        try { pairServer?.close() } catch (_: Exception) {}
+        pairServer = null
+    }
+
+    private fun startPairing(form: LinearLayout) {
+        stopPairing()
+        try {
+            val socket = ServerSocket(0)
+            pairServer = socket
+            pairing = true
+            val tokenBytes = ByteArray(16)
+            SecureRandom().nextBytes(tokenBytes)
+            pairToken = tokenBytes.joinToString("") { "%02x".format(it) }
+            val address = findLocalAddress() ?: throw IllegalStateException("Connect TV to Wi-Fi first")
+            val link = "http://" + address + ":" + socket.localPort + "/" + pairToken
+            form.addView(label("Scan with your phone on the same Wi-Fi. This pairing page is temporary.", 15f))
+            val qr = MultiFormatWriter().encode(link, BarcodeFormat.QR_CODE, 280, 280)
+            val bitmap = Bitmap.createBitmap(280, 280, Bitmap.Config.ARGB_8888)
+            for (y in 0 until 280) for (x in 0 until 280) bitmap.setPixel(x, y, if (qr[x, y]) Color.BLACK else Color.WHITE)
+            form.addView(ImageView(this).apply { setImageBitmap(bitmap) },
+                LinearLayout.LayoutParams(300, 300).apply { gravity = Gravity.CENTER_HORIZONTAL })
+            form.addView(label(link, 13f))
+            thread {
+                while (pairing) {
+                    try {
+                        val client = socket.accept()
+                        thread { handlePairClient(client) }
+                    } catch (_: Exception) { break }
+                }
+            }
+        } catch (e: Exception) {
+            status.text = "Phone pairing unavailable: " + (e.message ?: "Unknown error")
+            stopPairing()
+        }
+    }
+
+    private fun findLocalAddress(): String? {
+        val networks = NetworkInterface.getNetworkInterfaces()
+        while (networks.hasMoreElements()) {
+            val network = networks.nextElement()
+            if (!network.isUp || network.isLoopback) continue
+            val addresses = network.inetAddresses
+            while (addresses.hasMoreElements()) {
+                val ip = addresses.nextElement()
+                if (ip is Inet4Address && ip.isSiteLocalAddress) return ip.hostAddress
+            }
+        }
+        return null
+    }
+
+    private fun handlePairClient(client: Socket) {
+        client.use { sock ->
+            sock.soTimeout = 10000
+            val reader = BufferedReader(InputStreamReader(sock.getInputStream(), Charsets.UTF_8))
+            val request = reader.readLine() ?: return
+            val parts = request.split(" ")
+            if (parts.size < 2) return
+            val method = parts[0]
+            val path = parts[1]
+            var length = 0
+            while (true) {
+                val line = reader.readLine() ?: return
+                if (line.isEmpty()) break
+                if (line.startsWith("Content-Length:", true)) length = line.substringAfter(':').trim().toIntOrNull() ?: 0
+            }
+            val validPath = path.substringBefore('?') == "/" + pairToken
+            if (!validPath || !pairing) { sendPage(sock, 404, "Not found"); return }
+            if (method == "GET") {
+                sendPage(sock, 200, """<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ismail IPTV Pairing</title><style>body{font:18px sans-serif;background:#0c111d;color:white;max-width:480px;margin:40px auto;padding:20px}input,button{box-sizing:border-box;width:100%;padding:15px;margin:9px 0;font-size:18px;border-radius:9px}button{background:#27bde5;border:0}</style><h2>Ismail IPTV</h2><p>Enter your Xtream login to send it to your TV over local Wi-Fi.</p><form method="POST"><input name="server" placeholder="Server URL including port" required><input name="username" placeholder="Username" required><input name="password" type="password" placeholder="Password" required><button>Connect TV</button></form>""")
+            } else if (method == "POST" && length in 1..8192) {
+                val chars = CharArray(length)
+                var read = 0
+                while (read < length) {
+                    val n = reader.read(chars, read, length - read)
+                    if (n < 0) return
+                    read += n
+                }
+                val values = String(chars).split('&').mapNotNull {
+                    val pair = it.split('=', limit = 2)
+                    if (pair.size == 2) URLDecoder.decode(pair[0], "UTF-8") to URLDecoder.decode(pair[1], "UTF-8") else null
+                }.toMap()
+                val s = (values["server"] ?: "").trim().trimEnd('/')
+                val u = (values["username"] ?: "").trim()
+                val p = values["password"] ?: ""
+                if (!(s.startsWith("https://") || s.startsWith("http://")) || u.isBlank() || p.isBlank()) {
+                    sendPage(sock, 400, "Invalid server URL or missing credentials")
+                } else {
+                    sendPage(sock, 200, "<h2>Sent to TV. You can close this page.</h2>")
+                    runOnUiThread { server = s; username = u; password = p; stopPairing(); loadAccount() }
+                }
+            } else sendPage(sock, 405, "Method not allowed")
+        }
+    }
+
+    private fun sendPage(sock: Socket, code: Int, body: String) {
+        val bytes = body.toByteArray(Charsets.UTF_8)
+        val header = "HTTP/1.1 " + code + " OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: " + bytes.size + "\r\n\r\n"
+        sock.getOutputStream().write(header.toByteArray(Charsets.UTF_8))
+        sock.getOutputStream().write(bytes)
+        sock.getOutputStream().flush()
+    }
+
+    override fun onStop() { super.onStop(); player.pause(); stopPairing() }
+    override fun onDestroy() { stopPairing(); player.release(); super.onDestroy() }
 }
