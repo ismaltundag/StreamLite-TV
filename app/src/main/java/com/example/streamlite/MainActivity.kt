@@ -91,14 +91,14 @@ class MainActivity : Activity() {
                 try {
                     val encodedUser = URLEncoder.encode(user, "UTF-8")
                     val encodedPass = URLEncoder.encode(pass, "UTF-8")
-                    val api = "$"+"server/player_api.php?username=$"+"encodedUser&password=$"+"encodedPass"
+                    val api = "${server}/player_api.php?username=${encodedUser}&password=${encodedPass}"
                     val info = URL(api).openConnection().apply {
                         connectTimeout = 10000
                         readTimeout = 15000
                     }.getInputStream().bufferedReader().use { it.readText() }
                     val auth = org.json.JSONObject(info).optJSONObject("user_info")
                     if (auth?.optInt("auth", 0) != 1) throw IllegalArgumentException("Invalid login or unsupported Xtream server")
-                    val response = URL("$"+"api&action=get_live_streams").openConnection().apply {
+                    val response = URL("${api}&action=get_live_streams").openConnection().apply {
                         connectTimeout = 10000
                         readTimeout = 20000
                     }.getInputStream().bufferedReader().use { it.readText() }
@@ -108,11 +108,11 @@ class MainActivity : Activity() {
                         val id = item.optLong("stream_id", -1)
                         if (id < 0) return@mapNotNull null
                         val name = item.optString("name", "Channel")
-                        name to "$"+"server/live/$"+"encodedUser/$"+"encodedPass/$"+"id.ts"
+                        name to "${server}/live/${encodedUser}/${encodedPass}/${id}.ts"
                     }
                     runOnUiThread { showChannels(channels) }
                 } catch (e: Exception) {
-                    runOnUiThread { status.text = "Xtream login failed: $"+"{e.message}" }
+                    runOnUiThread { status.text = "Xtream login failed: ${e.message ?: e.javaClass.simpleName}" }
                 }
             }
         }
@@ -141,7 +141,7 @@ class MainActivity : Activity() {
 
     private fun showChannels(channels: List<Pair<String, String>>) {
         list.removeAllViews()
-        status.text = "$"+"{channels.size} channels found"
+        status.text = "${channels.size} channels found"
         channels.take(2000).forEach { (name, stream) ->
             list.addView(Button(this).apply {
                 text = name
