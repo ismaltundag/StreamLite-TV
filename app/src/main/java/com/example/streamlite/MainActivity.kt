@@ -36,6 +36,9 @@ class MainActivity : Activity() {
     private var password = ""
     private var section = "live"
     private var filter = "all"
+    private var categoryId = ""
+    private var categoryOpen = false
+    private val categoryNames = mutableMapOf<String, Map<String, String>>()
     private var channels = mutableListOf<Entry>()
     private var movies = mutableListOf<Entry>()
     private var series = mutableListOf<Entry>()
@@ -45,7 +48,7 @@ class MainActivity : Activity() {
     private var pairToken = ""
     private var pairing = false
 
-    data class Entry(val id: String, val name: String, val url: String, val kind: String, val container: String = "mp4")
+    data class Entry(val id: String, val name: String, val url: String, val kind: String, val container: String = "mp4", val categoryId: String = "")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -132,6 +135,17 @@ class MainActivity : Activity() {
             try {
                 val auth = JSONObject(fetch(api(""))).optJSONObject("user_info")
                 if (auth?.optInt("auth", 0) != 1) throw IllegalArgumentException("Server rejected login. Check credentials and URL.")
+                for ((kind, action) in listOf("live" to "get_live_categories", "movie" to "get_vod_categories", "series" to "get_series_categories")) {
+                    try {
+                        val categories = JSONArray(fetch(api(action)))
+                        val names = mutableMapOf<String, String>()
+                        for (i in 0 until categories.length()) {
+                            val item = categories.optJSONObject(i) ?: continue
+                            names[item.optString("category_id")] = item.optString("category_name", "Other")
+                        }
+                        categoryNames[kind] = names
+                    } catch (_: Exception) { categoryNames[kind] = emptyMap() }
+                }
                 val live = parseEntries(fetch(api("get_live_streams")), "live")
                 val vod = parseEntries(fetch(api("get_vod_streams")), "movie")
                 val shows = parseEntries(fetch(api("get_series")), "series")
@@ -177,7 +191,7 @@ class MainActivity : Activity() {
                 "movie" -> server + "/movie/" + u + "/" + p + "/" + id + "." + extension
                 else -> ""
             }
-            Entry(kind + ":" + id, name, address, kind, extension)
+            Entry(kind + ":" + id, name, address, kind, extension, item.optString("category_id"))
         }
     }
 
@@ -188,7 +202,7 @@ class MainActivity : Activity() {
         header.addView(label("ISMAIL IPTV", 24f))
         for (tab in listOf("live", "movie", "series")) {
             header.addView(button(when (tab) { "live" -> "LIVE TV"; "movie" -> "MOVIES"; else -> "SERIES" } +
-                if (section == tab) "  ●" else "") { section = tab; filter = "all"; showHome() })
+                if (section == tab) "  ●" else "") { section = tab; filter = "all"; categoryId = ""; categoryOpen = false; showHome() })
         }
         header.addView(button("ACCOUNT") { showAccount() })
         val body = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -199,7 +213,7 @@ class MainActivity : Activity() {
         left.addView(filters)
         if (section == "live") {
             for ((key, title) in listOf("all" to "ALL", "favorites" to "★ FAVORITES", "recent" to "◷ RECENT")) {
-                filters.addView(button(title + if (filter == key) " ●" else "") { filter = key; showHome() })
+                filters.addView(button(title + if (filter == key) " ●" else "") { filter = key; categoryId = ""; categoryOpen = false; showHome() })
             }
         }
         status = label("", 15f)
@@ -219,10 +233,31 @@ class MainActivity : Activity() {
     private fun populate() {
         items.removeAllViews()
         val source = when (section) { "live" -> channels; "movie" -> movies; else -> series }
+        if (filter == "all" && !categoryOpen) {
+            val grouped = source.groupBy { it.categoryId }
+            val names = categoryNames[section] ?: emptyMap()
+            val sorted = grouped.keys.sortedWith(compareBy({ names[it]?.lowercase() ?: "zzzz" }, { it }))
+            status.text = "${source.size} items · ${sorted.size} categories"
+            items.addView(button("ALL ${source.size} ITEMS") {
+                categoryId = "*"; categoryOpen = true; populate()
+            })
+            sorted.forEach { id ->
+                val name = names[id] ?: if (id.isBlank()) "Uncategorized" else "Category " + id
+                items.addView(button("▸ " + name + "   (" + (grouped[id]?.size ?: 0) + ")") {
+                    categoryId = id; categoryOpen = true; populate()
+                })
+            }
+            return
+        }
         val selected = when (filter) {
             "favorites" -> source.filter { favorites.contains(it.id) }
             "recent" -> recent.mapNotNull { id -> source.find { it.id == id } }
-            else -> source
+            else -> if (categoryId == "*") source else source.filter { it.categoryId == categoryId }
+        }
+        if (filter == "all") {
+            items.addView(button("← BACK TO CATEGORIES") {
+                categoryOpen = false; categoryId = ""; populate()
+            })
         }
         status.text = selected.size.toString() + " " + when (section) { "live" -> "channels"; "movie" -> "movies"; else -> "series" }
         selected.take(1500).forEach { entry ->
