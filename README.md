@@ -1,4 +1,4 @@
-# StreamLite TV
+# Ismail IPTV
 
 A lightweight, native Android TV IPTV player prototype for Philips Android TV / Google TV.
 
