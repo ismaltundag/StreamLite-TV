@@ -2,6 +2,8 @@ name: Build Android TV APK
 on:
   push:
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,3 +21,11 @@ jobs:
         with:
           name: StreamLite-TV-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+      - name: Publish APK for direct TV download
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk StreamLite-TV.apk
+          gh release view tv-latest >/dev/null 2>&1 || gh release create tv-latest --title "StreamLite TV - latest test build" --notes "Development APK for Philips Android TV. For testing only."
+          gh release upload tv-latest StreamLite-TV.apk --clobber
