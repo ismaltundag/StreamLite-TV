@@ -30,6 +30,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk StreamLite-TV.apk
-          gh release view tv-latest >/dev/null 2>&1 || gh release create tv-latest --title "StreamLite TV - latest test build" --notes "Development APK for Philips Android TV. For testing only."
+          gh release view tv-latest >/dev/null 2>&1 || gh release create tv-latest --title "Ismail IPTV - latest build" --notes "Development APK for Android TV."
           gh release delete-asset tv-latest StreamLite-TV.apk --yes 2>/dev/null || true
+          gh release edit tv-latest --notes "Version code: ${GITHUB_RUN_NUMBER}"
           gh release upload tv-latest StreamLite-TV.apk

@@ -1,6 +1,17 @@
 package com.example.streamlite
 
 import android.app.Activity
+import android.app.DownloadManager
+import android.app.AlertDialog
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.Settings
+import androidx.core.content.FileProvider
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Bundle
@@ -47,6 +58,9 @@ class MainActivity : Activity() {
     private var pairServer: ServerSocket? = null
     private var pairToken = ""
     private var pairing = false
+    private var updateDownloadId = -1L
+    private var updateReceiver: BroadcastReceiver? = null
+    private val releaseApi = "https://api.github.com/repos/ismaltundag/StreamLite-TV/releases/tags/tv-latest"
 
     data class Entry(val id: String, val name: String, val url: String, val kind: String, val container: String = "mp4", val categoryId: String = "")
 
@@ -59,6 +73,7 @@ class MainActivity : Activity() {
         username = prefs.getString("username", "") ?: ""
         password = prefs.getString("password", "") ?: ""
         if (server.isNotBlank() && username.isNotBlank() && password.isNotBlank()) loadAccount() else showLogin()
+        checkForUpdates(false)
     }
 
     private fun label(value: String, size: Float = 18f): TextView = TextView(this).apply {
@@ -327,6 +342,7 @@ class MainActivity : Activity() {
         root.addView(label("ACCOUNT", 28f))
         root.addView(label("Signed in as " + username + " · " + server))
         root.addView(button("BACK TO TV") { showHome() })
+        root.addView(button("CHECK FOR UPDATES") { checkForUpdates(true) })
         root.addView(button("CHANGE LOGIN") {
             prefs.edit().remove("password").apply()
             password = ""
@@ -438,6 +454,97 @@ class MainActivity : Activity() {
         sock.getOutputStream().flush()
     }
 
+    private fun checkForUpdates(manual: Boolean) {
+        thread {
+            try {
+                val connection = URL(releaseApi).openConnection().apply {
+                    connectTimeout = 8000
+                    readTimeout = 8000
+                    setRequestProperty("Accept", "application/vnd.github+json")
+                    setRequestProperty("User-Agent", "Ismail-IPTV-Android-TV")
+                }
+                val release = JSONObject(connection.getInputStream().bufferedReader().use { it.readText() })
+                val remoteVersion = release.optString("tag_name")
+                val assets = release.optJSONArray("assets") ?: JSONArray()
+                var apkUrl = ""
+                for (i in 0 until assets.length()) {
+                    val asset = assets.optJSONObject(i) ?: continue
+                    if (asset.optString("name") == "StreamLite-TV.apk") {
+                        apkUrl = asset.optString("browser_download_url")
+                        break
+                    }
+                }
+                val latestCode = release.optString("body").lineSequence()
+                    .firstOrNull { it.startsWith("Version code:") }
+                    ?.substringAfter(':')?.trim()?.toLongOrNull() ?: 0L
+                val currentCode = packageManager.getPackageInfo(packageName, 0).let {
+                    if (Build.VERSION.SDK_INT >= 28) it.longVersionCode else it.versionCode.toLong()
+                }
+                runOnUiThread {
+                    if (apkUrl.isNotBlank() && latestCode > currentCode) {
+                        AlertDialog.Builder(this)
+                            .setTitle("Ismail IPTV update available")
+                            .setMessage("Version " + latestCode + " is ready. Download and install it now?")
+                            .setPositiveButton("Install Update") { _, _ -> downloadUpdate(apkUrl) }
+                            .setNegativeButton("Later", null)
+                            .show()
+                    } else if (manual) {
+                        AlertDialog.Builder(this).setMessage("You have the latest available version.").setPositiveButton("OK", null).show()
+                    }
+                }
+            } catch (e: Exception) {
+                if (manual) runOnUiThread {
+                    AlertDialog.Builder(this).setMessage("Unable to check updates: " + (e.message ?: "Network error"))
+                        .setPositiveButton("OK", null).show()
+                }
+            }
+        }
+    }
+
+    private fun downloadUpdate(url: String) {
+        try {
+            val request = DownloadManager.Request(Uri.parse(url))
+                .setTitle("Ismail IPTV update")
+                .setDescription("Downloading the latest version")
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, "ismail-update.apk")
+            val manager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            updateDownloadId = manager.enqueue(request)
+            updateReceiver?.let { unregisterReceiver(it) }
+            updateReceiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) {
+                    if (intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1) != updateDownloadId) return
+                    val cursor = manager.query(DownloadManager.Query().setFilterById(updateDownloadId))
+                    val ok = cursor.use { it.moveToFirst() && it.getInt(it.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)) == DownloadManager.STATUS_SUCCESSFUL }
+                    if (ok) installUpdate() else Toast.makeText(this@MainActivity, "Update download failed", Toast.LENGTH_LONG).show()
+                }
+            }
+            val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(updateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            else registerReceiver(updateReceiver, filter)
+            Toast.makeText(this, "Downloading update…", Toast.LENGTH_LONG).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Update failed: " + e.message, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun installUpdate() {
+        if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+            AlertDialog.Builder(this).setMessage("Allow Ismail IPTV to install updates, then return and tap Check for Updates again.")
+                .setPositiveButton("Open Settings") { _, _ ->
+                    startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + packageName)))
+                }.setNegativeButton("Cancel", null).show()
+            return
+        }
+        val file = java.io.File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "ismail-update.apk")
+        val uri = FileProvider.getUriForFile(this, packageName + ".fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
+    }
+
     override fun onStop() { super.onStop(); player.pause(); stopPairing() }
-    override fun onDestroy() { stopPairing(); player.release(); super.onDestroy() }
+    override fun onDestroy() { stopPairing(); updateReceiver?.let { try { unregisterReceiver(it) } catch (_: Exception) {} }; player.release(); super.onDestroy() }
 }
