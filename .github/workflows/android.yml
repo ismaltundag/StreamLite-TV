@@ -4,6 +4,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+concurrency:
+  group: android-tv-release
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -28,4 +31,5 @@ jobs:
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk StreamLite-TV.apk
           gh release view tv-latest >/dev/null 2>&1 || gh release create tv-latest --title "StreamLite TV - latest test build" --notes "Development APK for Philips Android TV. For testing only."
-          gh release upload tv-latest StreamLite-TV.apk --clobber
+          gh release delete-asset tv-latest StreamLite-TV.apk --yes 2>/dev/null || true
+          gh release upload tv-latest StreamLite-TV.apk
