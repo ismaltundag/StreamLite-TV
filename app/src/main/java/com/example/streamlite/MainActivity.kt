@@ -30,7 +30,7 @@ class MainActivity : Activity() {
             setBackgroundColor(0xff101827.toInt())
         }
         val title = TextView(this).apply {
-            text = "StreamLite TV · Live"
+            text = "Ismail IPTV · Live"
             textSize = 26f
             setTextColor(-1)
         }
